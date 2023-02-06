@@ -34,7 +34,7 @@ impl Database {
     pub fn register<Q>(&mut self, f: fn(&Self, Q::Input) -> Q::Output)
     where
         Q: QueryDef,
-        Q::Output: 'static + Send + Sync,
+        Q::Output: 'static + Sync,
     {
         let redefining = self.fns.insert(Q::PATH, f as *const ()).is_some();
         let mut caches = self.caches.write().unwrap();
