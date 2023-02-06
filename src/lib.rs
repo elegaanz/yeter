@@ -23,6 +23,7 @@ struct CachedComputation {
     version: usize,
     dependencies: Vec<(&'static str, u64)>,
     value: Rc<dyn Any + 'static>,
+    redefined: bool,
 }
 
 impl Database {
@@ -45,7 +46,7 @@ impl Database {
                 let cc_res = Rc::get_mut(cc).and_then(|c| c.downcast_mut());
                 let cc: &mut CachedComputation = cc_res.unwrap();
                 cc.version += 1;
-                dbg!((Q::PATH, cc.version));
+                cc.redefined = true;
             }
         } else {
             caches.insert(Q::PATH, HashMap::new());
@@ -57,7 +58,6 @@ impl Database {
         I: Hash,
         O: 'static,
     {
-        dbg!(q);
         let f = self.fns.get(q).expect("Unknown query");
         let f: fn(&Self, I) -> O = unsafe { std::mem::transmute(*f) };
 
@@ -70,28 +70,30 @@ impl Database {
             let cache = caches.get(q).expect("Unknown query cache");
             if let Some(c) = cache.get(&input_hash) {
                 let c: Rc<CachedComputation> = c.clone().downcast().unwrap();
-                let newest_dep = c
-                    .dependencies
-                    .iter()
-                    .map(|(f, k)| {
-                        let dep: Rc<CachedComputation> = caches
-                            .get(f)
-                            .expect("Uknown query (dependency of another query)")
-                            .get(k)
-                            .expect("A cached computation has a non-cached dependency")
-                            .clone()
-                            .downcast()
-                            .unwrap();
-                        dep.version
-                    })
-                    .max()
-                    .unwrap_or(1);
-                dbg!(newest_dep);
-                dbg!(c.version);
-                if c.version >= newest_dep {
-                    return c.value.clone().downcast().unwrap();
+                if !c.redefined {
+                    let newest_dep = c
+                        .dependencies
+                        .iter()
+                        .map(|(f, k)| {
+                            let dep: Rc<CachedComputation> = caches
+                                .get(f)
+                                .expect("Uknown query (dependency of another query)")
+                                .get(k)
+                                .expect("A cached computation has a non-cached dependency")
+                                .clone()
+                                .downcast()
+                                .unwrap();
+                            dep.version
+                        })
+                        .max()
+                        .unwrap_or(1);
+                    if c.version >= newest_dep {
+                        return c.value.clone().downcast().unwrap();
+                    } else {
+                        newest_dep
+                    }
                 } else {
-                    newest_dep
+                    c.version
                 }
             } else {
                 0
@@ -105,6 +107,7 @@ impl Database {
                 version: old_version + 1,
                 dependencies: vec![],
                 value: Rc::new(()),
+                redefined: false,
             });
             cache.insert(input_hash, cc);
         };
@@ -114,7 +117,7 @@ impl Database {
             let stack_top = stack.iter().last().cloned();
             stack.push((q, input_hash));
 
-            if let Some(stack_top) = dbg!(stack_top) {
+            if let Some(stack_top) = stack_top {
                 let mut caches = self.caches.write().unwrap();
                 let cache = caches.get_mut(stack_top.0).unwrap();
                 let cc = cache.get_mut(&stack_top.1).unwrap();
