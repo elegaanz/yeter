@@ -6,7 +6,7 @@ yeter::queries! {
 
 fn main() {
     let mut db = yeter::Database::new();
-    db.register::<string::len::Query>(|name| {
+    db.register::<string::len::Query>(|_db, name| {
         dbg!(name.len())
     });
     let len1 = string::len::query(&db, "hello".into());
