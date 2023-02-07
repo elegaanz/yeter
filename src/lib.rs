@@ -5,32 +5,53 @@ use std::{
     sync::RwLock, rc::Rc,
 };
 
+/// A query definition
 pub trait QueryDef {
+    /// The path of the query
     const PATH: &'static str;
+    /// Input type
     type Input;
+    /// Output type
     type Output;
 }
 
+/// The main type to interact with Yéter
+/// 
+/// This structure holds a list of registered queries and their respective caches.
 #[derive(Default)]
 pub struct Database {
+    /// Registered queries
     fns: HashMap<&'static str, *const ()>,
+    /// The caches
+    /// 
+    /// It associates a query name with its cache.
+    /// A query cache associates an input hash with the corresponding output.
     caches: RwLock<HashMap<&'static str, HashMap<u64, Rc<dyn Any + 'static>>>>,
+    /// Current call stack, to track dependencies
     stack: RwLock<Vec<(&'static str, u64)>>,
 }
 
+/// A cache item
 #[derive(Debug)]
 struct CachedComputation {
+    /// The version of this item (starts at 1 and goes up with every recomputation)
     version: usize,
+    /// The other query calls this computation depends on
     dependencies: Vec<(&'static str, u64)>,
+    /// The output
     value: Rc<dyn Any + 'static>,
+    /// Wheter or not the associated query was redefined. If true, this cache item
+    /// is invalid and should be recomputed.
     redefined: bool,
 }
 
 impl Database {
+    /// Creates an empty database
     pub fn new() -> Self {
         Default::default()
     }
 
+    /// Registers a query
     pub fn register<Q>(&mut self, f: fn(&Self, Q::Input) -> Q::Output)
     where
         Q: QueryDef,
@@ -53,6 +74,7 @@ impl Database {
         }
     }
 
+    /// Runs a query (or not if it the result is already in the cache)
     pub fn run<I, O>(&self, q: &'static str, i: I) -> Rc<O>
     where
         I: Hash,
@@ -144,6 +166,9 @@ impl Database {
     }
 }
 
+/// Generates a query definition
+/// 
+/// Syntax: `query!(name, input type, output type)`
 #[macro_export]
 macro_rules! query {
     ($name:ident, $i:ty, $o:ty) => {
@@ -165,6 +190,21 @@ macro_rules! query {
     };
 }
 
+/// Generates multiple query definitions at once
+/// 
+/// Syntax :
+/// 
+/// ```rust,no_run
+/// queries! {
+///     namespace {
+///         query_name : input : output,
+///         other_query : input : output
+///     },
+///     other_namespace {
+///         // ...
+///     }
+/// }
+/// ```
 #[macro_export]
 macro_rules! queries {
     ($m:expr, $name:ident, $i:ty, $o:ty) => {
