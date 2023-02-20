@@ -2,8 +2,29 @@ use std::{
     any::Any,
     collections::{hash_map::DefaultHasher, HashMap},
     hash::{Hash, Hasher},
-    sync::RwLock, rc::Rc,
+    sync::RwLock, rc::Rc, marker::PhantomData,
 };
+
+struct ConstrainedFn<A, O, F: Fn(&Database, A) -> O> {
+    f: F,
+    _arg: PhantomData<A>,
+    _out: PhantomData<O>,
+}
+
+trait AnyFn {
+    fn try_call(&self, db: &Database, arg: Box<dyn Any>) -> Option<Rc<dyn Any>>;
+}
+
+impl<A: 'static, O: 'static, F: Fn(&Database, A) -> O + 'static> AnyFn for ConstrainedFn<A, O, F> {
+    fn try_call(&self, db: &Database, arg: Box<dyn Any>) -> Option<Rc<dyn Any>> {
+        if let Ok(arg) = arg.downcast() {
+            Some(Rc::new((self.f)(db, *arg)))
+        } else {
+            None
+        }
+    }
+}
+
 
 /// A query definition
 pub trait QueryDef {
@@ -21,7 +42,7 @@ pub trait QueryDef {
 #[derive(Default)]
 pub struct Database {
     /// Registered queries
-    fns: HashMap<&'static str, *const ()>,
+    fns: HashMap<&'static str, Box<dyn AnyFn>>,
     /// The caches
     /// 
     /// It associates a query name with its cache.
@@ -52,12 +73,18 @@ impl Database {
     }
 
     /// Registers a query
-    pub fn register<Q>(&mut self, f: fn(&Self, Q::Input) -> Q::Output)
+    pub fn register<F, Q>(&mut self, f: F)
     where
+        F: Fn(&Self, Q::Input) -> Q::Output + 'static,
         Q: QueryDef,
-        Q::Output: 'static + Sync,
+        Q::Input: 'static,
+        Q::Output: 'static,
     {
-        let redefining = self.fns.insert(Q::PATH, f as *const ()).is_some();
+        let redefining = self.fns.insert(Q::PATH, Box::new(ConstrainedFn {
+            f: Box::new(f),
+            _arg: PhantomData,
+            _out: PhantomData,
+        })).is_some();
         let mut caches = self.caches.write().unwrap();
         if redefining {
             let cache = caches
@@ -77,11 +104,10 @@ impl Database {
     /// Runs a query (or not if it the result is already in the cache)
     pub fn run<I, O>(&self, q: &'static str, i: I) -> Rc<O>
     where
-        I: Hash,
+        I: Hash + 'static,
         O: 'static,
     {
         let f = self.fns.get(q).expect("Unknown query");
-        let f: fn(&Self, I) -> O = unsafe { std::mem::transmute(*f) };
 
         let mut hasher = DefaultHasher::new();
         i.hash(&mut hasher);
@@ -148,7 +174,7 @@ impl Database {
             }
         };
 
-        let out = f(&self, i);
+        let out = f.try_call(&self, Box::new(i)).unwrap();
 
         {
             let stack = self.stack.write();
@@ -160,8 +186,8 @@ impl Database {
             let cache = caches.get_mut(q).unwrap();
             let cc = cache.get_mut(&input_hash).unwrap();
             let cc: &mut CachedComputation = Rc::get_mut(cc).unwrap().downcast_mut().unwrap();
-            cc.value = Rc::new(out);
-            cc.value.clone().downcast().unwrap()
+            cc.value = out;
+            cc.value.clone().downcast().expect("Cached computation was not of the correct type")
         }
     }
 }
