@@ -2,8 +2,10 @@ use std::{
     any::Any,
     collections::{hash_map::DefaultHasher, HashMap},
     hash::{Hash, Hasher},
-    sync::RwLock, rc::Rc, marker::PhantomData,
+    sync::RwLock, rc::Rc, marker::PhantomData, cell::RefCell,
 };
+
+use state::Container;
 
 struct ConstrainedFn<A, O, F: Fn(&Database, A) -> O> {
     f: F,
@@ -50,6 +52,8 @@ pub struct Database {
     caches: RwLock<HashMap<&'static str, HashMap<u64, Rc<dyn Any + 'static>>>>,
     /// Current call stack, to track dependencies
     stack: RwLock<Vec<(&'static str, u64)>>,
+    /// Effects that have been executed by the current query
+    effects: RwLock<state::Container![Send]>,
 }
 
 /// A cache item
@@ -61,6 +65,8 @@ struct CachedComputation {
     dependencies: Vec<(&'static str, u64)>,
     /// The output
     value: Rc<dyn Any + 'static>,
+    /// Saved side effects
+    effects: state::Container![Send],
     /// Wheter or not the associated query was redefined. If true, this cache item
     /// is invalid and should be recomputed.
     redefined: bool,
@@ -156,6 +162,7 @@ impl Database {
                 dependencies: vec![],
                 value: Rc::new(()),
                 redefined: false,
+                effects: <state::Container![Send]>::new(),
             });
             cache.insert(input_hash, cc);
         };
@@ -182,13 +189,42 @@ impl Database {
         }
 
         {
+            let mut effects = self.effects.write().unwrap();
+            let effects = std::mem::replace(&mut *effects, <Container![Send]>::new());
+
             let mut caches = self.caches.write().unwrap();
             let cache = caches.get_mut(q).unwrap();
             let cc = cache.get_mut(&input_hash).unwrap();
             let cc: &mut CachedComputation = Rc::get_mut(cc).unwrap().downcast_mut().unwrap();
+            cc.effects = effects;
             cc.value = out;
             cc.value.clone().downcast().expect("Cached computation was not of the correct type")
         }
+    }
+
+    /// Returns a side effect collection
+    pub fn effect<'a, T: 'static + Clone>(&'a self) -> Vec<T> {
+        let caches = self.caches.read().unwrap();
+        caches.values()
+            .flat_map(|x| x.values())
+            .filter_map(|x| {
+                let cc: Rc<CachedComputation> = Rc::clone(x).downcast().expect("Database::effect: invalid cache");
+                let cell  = cc.effects.try_get::<RefCell<Vec<T>>>()?.borrow();
+                Some(cell.clone())
+            })
+            .flatten()
+            .collect()
+    }
+
+    /// Produces a side effect
+    pub fn do_effect<T: 'static + Clone + Send>(&self, eff: T) {
+        let effects = self.effects.write().unwrap();
+        if effects.try_get::<RefCell<Vec<T>>>().is_none() {
+            effects.set::<RefCell<Vec<T>>>(RefCell::new(Vec::new()));
+        }
+        let vec = effects.get::<RefCell<Vec<T>>>();
+        let mut vec = vec.borrow_mut();
+        vec.push(eff);
     }
 }
 
