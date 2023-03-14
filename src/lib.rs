@@ -234,20 +234,19 @@ impl Database {
 #[macro_export]
 macro_rules! query {
     ($name:ident, $i:ty, $o:ty) => {
-        pub mod $name {
-            #[allow(non_camel_case_types)]
-            pub struct Query;
+        #[allow(non_camel_case_types)]
+        #[doc(hidden)]
+        pub struct $name {}
 
-            impl yeter::QueryDef for Query {
-                const PATH: &'static str = stringify!($name);
-                type Input = $i;
-                type Output = $o;
-            }
+        impl yeter::QueryDef for $name {
+            const PATH: &'static str = stringify!($name);
+            type Input = $i;
+            type Output = $o;
+        }
 
-            pub fn query(db: &yeter::Database, i: $i) -> std::rc::Rc<$o> {
-                use yeter::QueryDef;
-                db.run::<$i, $o>(Query::PATH, i)
-            }
+        pub fn $name(db: &yeter::Database, i: $i) -> std::rc::Rc<$o> {
+            use yeter::QueryDef;
+            db.run::<$i, $o>($name::PATH, i)
         }
     };
 }
@@ -270,20 +269,19 @@ macro_rules! query {
 #[macro_export]
 macro_rules! queries {
     ($m:expr, $name:ident, $i:ty, $o:ty) => {
-        pub mod $name {
-            #[allow(non_camel_case_types)]
-            pub struct Query;
+        #[allow(non_camel_case_types)]
+        #[doc(hidden)]
+        pub struct $name {}
 
-            impl yeter::QueryDef for Query {
-                const PATH: &'static str = concat!($m, "/", stringify!($name));
-                type Input = $i;
-                type Output = $o;
-            }
+        impl yeter::QueryDef for $name {
+            const PATH: &'static str = concat!($m, "/", stringify!($name));
+            type Input = $i;
+            type Output = $o;
+        }
 
-            pub fn query(db: &yeter::Database, i: $i) -> std::rc::Rc<$o> {
-                use yeter::QueryDef;
-                db.run::<$i, $o>(Query::PATH, i)
-            }
+        pub fn $name(db: &yeter::Database, i: $i) -> std::rc::Rc<$o> {
+            use yeter::QueryDef;
+            db.run::<$i, $o>($name::PATH, i)
         }
     };
     ($mname:ident {
