@@ -5,16 +5,16 @@ query!(sum, (), usize);
 
 fn main() {
     let mut db = yeter::Database::new();
-    db.register::<_, list::Query>(|_db, ()| {
+    db.register::<_, list>(|_db, ()| {
         vec![1, 2, 3]
     });
-    db.register::<_, sum::Query>(|db, ()| {
-        list::query(db, ()).iter().sum()
+    db.register::<_, sum>(|db, ()| {
+        list(db, ()).iter().sum()
     });
-    assert_eq!(*sum::query(&db, ()), 6);
+    assert_eq!(*sum(&db, ()), 6);
 
-    db.register::<_, list::Query>(|_db, ()| {
+    db.register::<_, list>(|_db, ()| {
         vec![]
     });
-    assert_eq!(*sum::query(&db, ()), 0);
+    assert_eq!(*sum(&db, ()), 0);
 }
