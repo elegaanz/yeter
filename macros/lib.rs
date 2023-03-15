@@ -1,4 +1,5 @@
 use proc_macro2::{Ident, Span, TokenStream};
+use proc_macro_error::*;
 use quote::quote;
 use syn::punctuated::Punctuated;
 use syn::{
@@ -79,15 +80,18 @@ fn ident_to_expr(id: Ident) -> Expr {
     .into()
 }
 
+#[proc_macro_error]
 #[proc_macro_attribute]
 pub fn query(
     attr: proc_macro::TokenStream,
     item: proc_macro::TokenStream,
 ) -> proc_macro::TokenStream {
-    assert!(
-        attr.is_empty(),
-        "#[yeter::query] doesn't accept any attributes"
-    );
+    if !attr.is_empty() {
+        emit_error!(
+            TokenStream::from(attr),
+            "#[yeter::query] doesn't expect any attributes"
+        );
+    }
 
     let mut function_no_impl;
     let mut function_impl;
@@ -113,19 +117,46 @@ pub fn query(
         .cloned()
         .collect::<Vec<_>>();
 
-    let db_ident = match fn_args
-        .first()
-        .expect("query must take a database as its first argument")
-    {
+    let db_ident_fallback = Ident::new("db", Span::call_site());
+    let db_ident = match fn_args.first() {
         // self, &self, &mut self
-        FnArg::Receiver(_) => panic!("#[yeter::query] can't be used on instance methods"),
-        FnArg::Typed(pat_type) => match pat_type.pat.as_ref() {
+        Some(receiver @ FnArg::Receiver(_)) => {
+            emit_error!(
+                receiver,
+                "#[yeter::query] can't be used on instance methods";
+                hint = "did you mean `db: &yeter::Database`?";
+            );
+
+            &db_ident_fallback
+        }
+        Some(FnArg::Typed(pat_type)) => match pat_type.pat.as_ref() {
             Pat::Ident(ident) => &ident.ident,
-            _ => panic!("simple database argument pattern expected"),
+            _ => {
+                emit_error!(
+                    pat_type.pat,
+                    "simple database argument pattern expected";
+                    help = "use a simple argument declaration such as `db: &yeter::Database`";
+                );
+
+                &db_ident_fallback
+            }
         },
+        None => {
+            emit_error!(
+                function.sig(), "a query must take a database as its first argument";
+                note = "no arguments were specified";
+            );
+
+            &db_ident_fallback
+        }
     };
 
-    let query_arg_count = fn_args.len() as u32 - 1;
+    let fn_arg_count = fn_args.len() as u32;
+    let query_arg_count = if fn_arg_count == 0 {
+        0
+    } else {
+        fn_arg_count - 1
+    };
 
     let unit_type;
 
@@ -168,6 +199,7 @@ pub fn query(
         #(#to_impl)*
     };
 
+    set_dummy(expanded.clone()); // Still produce these tokens if an error was emitted
     expanded.into()
 }
 
