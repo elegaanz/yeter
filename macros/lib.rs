@@ -89,7 +89,8 @@ pub fn query(
         "#[yeter::query] doesn't accept any attributes"
     );
 
-    let function = parse_macro_input!(item as ItemFn);
+    let mut function = parse_macro_input!(item as ItemFn);
+    let query_attrs = std::mem::take(&mut function.attrs);
     let fn_args = &function.sig.inputs;
     let query_args = fn_args
         .iter()
@@ -148,6 +149,7 @@ pub fn query(
         .collect::<Punctuated<_, Token![,]>>();
 
     let expanded = quote! {
+        #(#query_attrs)*
         #query_vis fn #query_name(#db_ident: &::yeter::Database, #calling_tuple_args) -> ::std::rc::Rc<#output_type> {
             use ::yeter::QueryDef;
             #db_ident.run::<#input_type, #output_type>(#query_name::PATH, #calling_tuple)
