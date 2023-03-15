@@ -1,9 +1,9 @@
-use proc_macro2::{Ident, Span};
+use proc_macro2::{Ident, Span, TokenStream};
 use quote::quote;
 use syn::punctuated::Punctuated;
 use syn::{
-    parse_macro_input, Expr, ExprField, ExprPath, ExprTuple, FnArg, Index, ItemFn, Member, Pat,
-    PatIdent, PatType, Path, ReturnType, Token, Type, TypeTuple,
+    Attribute, Expr, ExprField, ExprPath, ExprTuple, FnArg, ForeignItemFn, Index, ItemFn, Member,
+    Pat, PatIdent, PatType, Path, ReturnType, Signature, Token, Type, TypeTuple, Visibility,
 };
 
 fn fn_arg_to_type<'a>(arg: &FnArg) -> &Type {
@@ -89,9 +89,23 @@ pub fn query(
         "#[yeter::query] doesn't accept any attributes"
     );
 
-    let mut function = parse_macro_input!(item as ItemFn);
-    let query_attrs = std::mem::take(&mut function.attrs);
-    let fn_args = &function.sig.inputs;
+    let mut function_no_impl;
+    let mut function_impl;
+    let function = {
+        if let Ok(f) = syn::parse::<ForeignItemFn>(item.clone()) {
+            function_no_impl = f;
+            &mut function_no_impl as &mut dyn FunctionItem
+        } else if let Ok(f) = syn::parse::<ItemFn>(item.clone()) {
+            function_impl = f;
+            &mut function_impl as &mut dyn FunctionItem
+        } else {
+            let item = TokenStream::from(item);
+            return (quote! { compile_error!("expected fn item"); #item }).into();
+        }
+    };
+
+    let query_attrs = function.take_attrs();
+    let fn_args = &function.sig().inputs;
     let query_args = fn_args
         .iter()
         .skip(1)
@@ -115,11 +129,11 @@ pub fn query(
 
     let unit_type;
 
-    let query_vis = &function.vis;
-    let query_name = &function.sig.ident;
+    let query_vis = &function.vis();
+    let query_name = &function.sig().ident;
 
     let input_type = build_type_tuple(query_args.iter().cloned());
-    let output_type = match &function.sig.output {
+    let output_type = match &function.sig().output {
         ReturnType::Default => {
             unit_type = build_unit_tuple();
             &unit_type
@@ -132,21 +146,7 @@ pub fn query(
     let calling_tuple_args = calling_tuple_args(calling_arg_names.iter().cloned().zip(query_args));
     let calling_tuple = build_ident_tuple(calling_arg_names.into_iter());
 
-    let input_ident = Ident::new("input", Span::mixed_site());
-    let input_ident_expr = Box::new(ident_to_expr(input_ident.clone()));
-    let calling_args = std::iter::once(ident_to_expr(db_ident.clone()))
-        .chain((0..query_arg_count).map(|n| {
-            Expr::Field(ExprField {
-                attrs: Default::default(),
-                base: input_ident_expr.clone(),
-                dot_token: Default::default(),
-                member: Member::Unnamed(Index {
-                    index: n,
-                    span: Span::mixed_site(),
-                }),
-            })
-        }))
-        .collect::<Punctuated<_, Token![,]>>();
+    let to_impl = function.to_impl(query_arg_count).into_iter();
 
     let expanded = quote! {
         #(#query_attrs)*
@@ -165,14 +165,78 @@ pub fn query(
             type Output = #output_type;
         }
 
-        impl ::yeter::ImplementedQueryDef for #query_name {
-            #[inline]
-            fn run(#db_ident: &::yeter::Database, #input_ident: Self::Input) -> Self::Output {
-                #function
-                #query_name(#calling_args)
-            }
-        }
+        #(#to_impl)*
     };
 
     expanded.into()
+}
+
+trait FunctionItem {
+    fn take_attrs(&mut self) -> Vec<Attribute>;
+    fn vis(&self) -> &Visibility;
+    fn sig(&self) -> &Signature;
+
+    fn to_impl(&self, _query_arg_count: u32) -> Option<TokenStream> {
+        None
+    }
+}
+
+impl FunctionItem for ForeignItemFn {
+    fn take_attrs(&mut self) -> Vec<Attribute> {
+        std::mem::take(&mut self.attrs)
+    }
+
+    fn vis(&self) -> &Visibility {
+        &self.vis
+    }
+
+    fn sig(&self) -> &Signature {
+        &self.sig
+    }
+}
+
+impl FunctionItem for ItemFn {
+    fn take_attrs(&mut self) -> Vec<Attribute> {
+        std::mem::take(&mut self.attrs)
+    }
+
+    fn vis(&self) -> &Visibility {
+        &self.vis
+    }
+
+    fn sig(&self) -> &Signature {
+        &self.sig
+    }
+
+    fn to_impl(&self, query_arg_count: u32) -> Option<TokenStream> {
+        let query_name = &self.sig().ident;
+        let db_ident = Ident::new("db", Span::mixed_site());
+        let input_ident = Ident::new("input", Span::mixed_site());
+        let input_ident_expr = Box::new(ident_to_expr(input_ident.clone()));
+        let calling_args = (0..query_arg_count)
+            .map(|n| {
+                Expr::Field(ExprField {
+                    attrs: Default::default(),
+                    base: input_ident_expr.clone(),
+                    dot_token: Default::default(),
+                    member: Member::Unnamed(Index {
+                        index: n,
+                        span: Span::mixed_site(),
+                    }),
+                })
+            })
+            .collect::<Punctuated<_, Token![,]>>();
+
+        let s = self;
+
+        Some(quote! {
+            impl ::yeter::ImplementedQueryDef for #query_name {
+                #[inline]
+                fn run(#db_ident: &::yeter::Database, #input_ident: Self::Input) -> Self::Output {
+                    #s
+                    #query_name(#db_ident, #calling_args)
+                }
+            }
+        })
+    }
 }
