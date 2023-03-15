@@ -7,7 +7,7 @@ use syn::{
     Pat, PatIdent, PatType, Path, ReturnType, Signature, Token, Type, TypeTuple, Visibility,
 };
 
-fn fn_arg_to_type<'a>(arg: &FnArg) -> &Type {
+fn fn_arg_to_type(arg: &FnArg) -> &Type {
     match arg {
         FnArg::Receiver(_) => unimplemented!(),
         FnArg::Typed(arg) => arg.ty.as_ref(),
@@ -30,9 +30,24 @@ fn build_unit_tuple() -> Type {
     build_type_tuple([].into_iter())
 }
 
-fn arg_names(count: u32) -> Vec<Ident> {
-    (0..count)
-        .map(|n| Ident::new(&format!("arg{n}"), Span::mixed_site()))
+fn arg_name(arg: &FnArg) -> Option<Ident> {
+    match arg {
+        FnArg::Receiver(_) => Some(Ident::new("self", Span::call_site())),
+        FnArg::Typed(pat_type) => {
+            if let Pat::Ident(name) = pat_type.pat.as_ref() {
+                Some(name.ident.clone())
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn arg_names<'a>(args: impl Iterator<Item = &'a FnArg>) -> Vec<Ident> {
+    args.enumerate()
+        .map(|(n, arg)| {
+            arg_name(arg).unwrap_or_else(|| Ident::new(&format!("arg{n}"), Span::mixed_site()))
+        })
         .collect()
 }
 
@@ -172,7 +187,7 @@ pub fn query(
         ReturnType::Type(_, typ) => typ.as_ref(),
     };
 
-    let calling_arg_names = arg_names(query_arg_count);
+    let calling_arg_names = arg_names(fn_args.iter().skip(1));
 
     let calling_tuple_args = calling_tuple_args(calling_arg_names.iter().cloned().zip(query_args));
     let calling_tuple = build_ident_tuple(calling_arg_names.into_iter());
