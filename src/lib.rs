@@ -1,3 +1,5 @@
+pub use yeter_macros::*;
+
 use std::{
     any::Any,
     collections::{hash_map::DefaultHasher, HashMap},
@@ -36,6 +38,14 @@ pub trait QueryDef {
     type Input;
     /// Output type
     type Output;
+}
+
+/// A query definition with a provided implementation
+///
+/// Implementations can be created with [`#[yeter::query]`][yeter_macros::query] and they can be
+/// registered with [`Database::register_impl`].
+pub trait ImplementedQueryDef: QueryDef {
+    fn run(db: &Database, input: Self::Input) -> Self::Output;
 }
 
 /// The main type to interact with Yéter
@@ -105,6 +115,16 @@ impl Database {
         } else {
             caches.insert(Q::PATH, HashMap::new());
         }
+    }
+
+    /// Registers a query that has a provided implementation
+    pub fn register_impl<Q>(&mut self)
+    where
+        Q: ImplementedQueryDef + 'static,
+        Q::Input: 'static,
+        Q::Output: 'static,
+    {
+        self.register::<_, Q>(Q::run)
     }
 
     /// Runs a query (or not if it the result is already in the cache)
@@ -229,10 +249,10 @@ impl Database {
 }
 
 /// Generates a query definition
-/// 
-/// Syntax: `query!(name, input type, output type)`
+///
+/// Syntax: `query_def!(name, input type, output type)`
 #[macro_export]
-macro_rules! query {
+macro_rules! query_def {
     ($name:ident, $i:ty, $o:ty) => {
         #[allow(non_camel_case_types)]
         #[doc(hidden)]
@@ -256,7 +276,7 @@ macro_rules! query {
 /// Syntax :
 /// 
 /// ```rust,no_run
-/// queries! {
+/// queries_def! {
 ///     namespace {
 ///         query_name : input : output,
 ///         other_query : input : output
@@ -267,7 +287,7 @@ macro_rules! query {
 /// }
 /// ```
 #[macro_export]
-macro_rules! queries {
+macro_rules! queries_def {
     ($m:expr, $name:ident, $i:ty, $o:ty) => {
         #[allow(non_camel_case_types)]
         #[doc(hidden)]
@@ -288,17 +308,17 @@ macro_rules! queries {
         $( $name:ident : $i:ty : $o:ty ),*
     }) => {
         pub mod $mname {
-            $( yeter::queries! { stringify!($mname), $name, $i, $o } )*
+            $( yeter::queries_def! { stringify!($mname), $name, $i, $o } )*
         }
     };
     ($mname:ident {
         $( $name:ident : $i:ty : $o:ty ),*
     }, $( $rest:tt )*) => {
         pub mod $mname {
-            $( yeter::queries! { stringify!($mname), $name, $i, $o } )*
+            $( yeter::queries_def! { stringify!($mname), $name, $i, $o } )*
         }
 
-        yeter::queries! {
+        yeter::queries_def! {
             $( $rest )*
         }
     }

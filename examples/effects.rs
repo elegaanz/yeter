@@ -1,17 +1,13 @@
-yeter::queries! {
-    string {
-        len : String : usize
+mod string {
+    #[yeter::query]
+    pub fn len(_db: &yeter::Database, input: String) -> usize {
+        input.len()
     }
 }
 
 fn main() {
     let mut db = yeter::Database::new();
-    db.register::<_, string::len>(|db, name| {
-        if name.len() == 0 {
-            db.do_effect("An empty string was passed");
-        }
-        dbg!(name.len())
-    });
+    db.register_impl::<string::len>();
     let len1 = string::len(&db, "".into());
     for msg in db.effect::<&'static str>() {
         println!("EFFECT [1]: {}", msg);

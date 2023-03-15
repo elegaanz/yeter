@@ -7,3 +7,7 @@ license = "GPL-3.0"
 
 [dependencies]
 state = "0.5"
+yeter-macros = { path = "macros", version = "0.1.0" }
+
+[workspace]
+members = ["macros"]
