@@ -1,5 +1,3 @@
-pub use yeter_macros::*;
-
 use std::{
     any::Any,
     collections::{hash_map::DefaultHasher, HashMap},
@@ -31,6 +29,9 @@ impl<A: 'static, O: 'static, F: Fn(&Database, A) -> O + 'static> AnyFn for Const
 
 
 /// A query definition
+///
+/// Implementations can be created with [`#[yeter::query]`][query] and can be registered with
+/// [`Database::register`].
 pub trait QueryDef {
     /// The path of the query
     const PATH: &'static str;
@@ -40,23 +41,23 @@ pub trait QueryDef {
     type Output;
 }
 
-/// A query definition with a provided implementation
+/// A query definition with an implicit definition
 ///
-/// Implementations can be created with [`#[yeter::query]`][yeter_macros::query] and they can be
-/// registered with [`Database::register_impl`].
+/// Implementations can be created with [`#[yeter::query]`][query] and can be registered with
+/// [`Database::register_impl`].
 pub trait ImplementedQueryDef: QueryDef {
     fn run(db: &Database, input: Self::Input) -> Self::Output;
 }
 
 /// The main type to interact with Yéter
-/// 
+///
 /// This structure holds a list of registered queries and their respective caches.
 #[derive(Default)]
 pub struct Database {
     /// Registered queries
     fns: HashMap<&'static str, Box<dyn AnyFn>>,
     /// The caches
-    /// 
+    ///
     /// It associates a query name with its cache.
     /// A query cache associates an input hash with the corresponding output.
     caches: RwLock<HashMap<&'static str, HashMap<u64, Rc<dyn Any + 'static>>>>,
@@ -89,6 +90,17 @@ impl Database {
     }
 
     /// Registers a query
+    ///
+    /// Refer to the [`#[yeter::query]`][query] macro's documentation for help with creating a
+    /// query.
+    ///
+    /// This function is idempotent, and a query may be redefined multiple times.
+    ///
+    /// # Note
+    ///
+    /// Use [Database::register_impl] to register queries with an implicit definition. The
+    /// [register][Database::register] method requires you to provide a definition and will
+    /// completely ignore any implicit one.
     pub fn register<F, Q>(&mut self, f: F)
     where
         F: Fn(&Self, Q::Input) -> Q::Output + 'static,
@@ -117,7 +129,13 @@ impl Database {
         }
     }
 
-    /// Registers a query that has a provided implementation
+    /// Registers a query that has an implicit definition
+    ///
+    /// Refer to the [`#[yeter::query]`][query] macro's documentation for help with creating an
+    /// implicitly-defined query.
+    ///
+    /// This function directly calls [Database::register]. Therefore, it is also idempotent, and any
+    /// query registered with it can be later manually overridden with [Database::register].
     pub fn register_impl<Q>(&mut self)
     where
         Q: ImplementedQueryDef + 'static,
@@ -248,78 +266,62 @@ impl Database {
     }
 }
 
-/// Generates a query definition
+/// Annotates a function to make it a _query_ that benefits from Yéter's features
 ///
-/// Syntax: `query_def!(name, input type, output type)`
-#[macro_export]
-macro_rules! query_def {
-    ($name:ident, $i:ty, $o:ty) => {
-        #[allow(non_camel_case_types)]
-        #[doc(hidden)]
-        pub struct $name {}
-
-        impl yeter::QueryDef for $name {
-            const PATH: &'static str = stringify!($name);
-            type Input = $i;
-            type Output = $o;
-        }
-
-        pub fn $name(db: &yeter::Database, i: $i) -> std::rc::Rc<$o> {
-            use yeter::QueryDef;
-            db.run::<$i, $o>($name::PATH, i)
-        }
-    };
-}
-
-/// Generates multiple query definitions at once
-/// 
-/// Syntax :
-/// 
-/// ```rust,no_run
-/// queries_def! {
-///     namespace {
-///         query_name : input : output,
-///         other_query : input : output
-///     },
-///     other_namespace {
-///         // ...
-///     }
-/// }
+/// # Usage
+///
+/// When annotated, a function will be turned into a Yéter _query_. Its return value is turned into
+/// an [`Rc<T>`][std::rc::Rc] where `T` is the original declared return value. Calls to query
+/// functions will benefit from Yéter's memoization and side effect system.
+///
+/// In addition to the modified function, the macro also produces a type-level empty enum that is
+/// used to uniquely identify a given query. If the function is declared with a body, an additional
+/// "implicit definition" will be attached to this type, and it will be possible to register
+/// the query definition and declaration simultaneously with [Database::register_impl].
+///
+/// # Syntax
+///
+/// `#[yeter::query]` doesn't expect any attribute parameters. It must be applied to a function with
+/// or without a body, whose first argument is present and is typed as a
+/// [`&yeter::Database`][Database]. The function cannot be an instance method (i.e. have a `self`
+/// receiver as its first argument).
+///
+/// # Example
+///
 /// ```
-#[macro_export]
-macro_rules! queries_def {
-    ($m:expr, $name:ident, $i:ty, $o:ty) => {
-        #[allow(non_camel_case_types)]
-        #[doc(hidden)]
-        pub struct $name {}
-
-        impl yeter::QueryDef for $name {
-            const PATH: &'static str = concat!($m, "/", stringify!($name));
-            type Input = $i;
-            type Output = $o;
-        }
-
-        pub fn $name(db: &yeter::Database, i: $i) -> std::rc::Rc<$o> {
-            use yeter::QueryDef;
-            db.run::<$i, $o>($name::PATH, i)
-        }
-    };
-    ($mname:ident {
-        $( $name:ident : $i:ty : $o:ty ),*
-    }) => {
-        pub mod $mname {
-            $( yeter::queries_def! { stringify!($mname), $name, $i, $o } )*
-        }
-    };
-    ($mname:ident {
-        $( $name:ident : $i:ty : $o:ty ),*
-    }, $( $rest:tt )*) => {
-        pub mod $mname {
-            $( yeter::queries_def! { stringify!($mname), $name, $i, $o } )*
-        }
-
-        yeter::queries_def! {
-            $( $rest )*
-        }
-    }
-}
+/// // Declaration and implicit definition
+/// #[yeter::query]
+/// fn length(db: &yeter::Database, input: String) -> usize {
+///     input.len()
+/// }
+///
+/// // Registration
+/// # fn main() {
+/// let mut db = yeter::Database::new();
+/// db.register_impl::<length>();
+/// # }
+/// ```
+///
+/// It is also possible to declare a query and define it later. Trying to use it before registration
+/// causes a runtime error.
+///
+/// ```
+/// # use std::path::PathBuf;
+/// // Declaration only
+/// #[yeter::query]
+/// fn all_workspace_files(db: &yeter::Database) -> Vec<PathBuf>;
+///
+/// // Definition and registration
+/// # fn main() {
+/// let mut db = yeter::Database::new();
+/// db.register::<_, all_workspace_files>(|db, ()| {
+///     vec![ /* ... */ ]
+/// });
+/// # }
+/// ```
+///
+/// # See also
+///
+///   * [`Database::register_impl`] to register a query that has an _implicit definition_
+///   * [`Database::register`] to both register a query and define it
+pub use yeter_macros::query;
