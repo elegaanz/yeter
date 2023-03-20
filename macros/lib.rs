@@ -273,14 +273,18 @@ impl FunctionItem for ItemFn {
             })
             .collect::<Punctuated<_, Token![,]>>();
 
-        let s = self;
+        let call_ident_span = Span::call_site().located_at(query_name.span());
+        // When Span::def_site is stable, we will be able to properly create hygienic idents
+        let call_ident = Ident::new(&format!("__yeter_{query_name}"), call_ident_span);
+        let mut s = self.clone();
+        s.sig.ident = call_ident.clone();
 
         Some(quote! {
             impl ::yeter::ImplementedQueryDef for #query_name {
                 #[inline]
                 fn run(#db_ident: &::yeter::Database, #input_ident: Self::Input) -> Self::Output {
                     #s
-                    #query_name(#db_ident, #calling_args)
+                    #call_ident(#db_ident, #calling_args)
                 }
             }
         })
