@@ -83,6 +83,28 @@ struct CachedComputation {
     redefined: bool,
 }
 
+/// Error returned by [Database::try_run] when a 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CycleError;
+
+struct UninitCachedComputationValue;
+
+impl CachedComputation {
+    fn new(version: usize) -> Self {
+        CachedComputation {
+            version,
+            dependencies: vec![],
+            value: Rc::new(UninitCachedComputationValue),
+            redefined: false,
+            effects: <state::Container![Send]>::new(),
+        }
+    }
+
+    fn is_uninit(&self) -> bool {
+        matches!(self.value.downcast_ref::<UninitCachedComputationValue>(), Some(UninitCachedComputationValue))
+    }
+}
+
 impl Database {
     /// Creates an empty database
     pub fn new() -> Self {
@@ -146,7 +168,18 @@ impl Database {
     }
 
     /// Runs a query (or not if it the result is already in the cache)
+    /// 
+    /// Panics if a query ends up in a cyclic computation
     pub fn run<I, O>(&self, q: &'static str, i: I) -> Rc<O>
+        where
+            I: Hash + 'static,
+            O: 'static,
+    {
+        self.try_run(q, i).unwrap()
+    }
+
+    /// Tries to runs a query (or not if it the result is already in the cache)
+    pub fn try_run<I, O>(&self, q: &'static str, i: I) -> Result<Rc<O>, CycleError>
     where
         I: Hash + 'static,
         O: 'static,
@@ -180,7 +213,13 @@ impl Database {
                         .max()
                         .unwrap_or(1);
                     if c.version >= newest_dep {
-                        return c.value.clone().downcast().unwrap();
+                        if let Ok(v) = c.value.clone().downcast() {
+                            return Ok(v);
+                        } else if c.is_uninit() {
+                            return Err(CycleError);
+                        } else {
+                            unimplemented!("impossible downcast")
+                        }
                     } else {
                         newest_dep
                     }
@@ -195,13 +234,7 @@ impl Database {
         {
             let mut caches = self.caches.write().unwrap();
             let cache = caches.get_mut(q).expect("Unknown query cache");
-            let cc = Rc::new(CachedComputation {
-                version: old_version + 1,
-                dependencies: vec![],
-                value: Rc::new(()),
-                redefined: false,
-                effects: <state::Container![Send]>::new(),
-            });
+            let cc = Rc::new(CachedComputation::new(old_version + 1));
             cache.insert(input_hash, cc);
         };
 
@@ -236,7 +269,7 @@ impl Database {
             let cc: &mut CachedComputation = Rc::get_mut(cc).unwrap().downcast_mut().unwrap();
             cc.effects = effects;
             cc.value = out;
-            cc.value.clone().downcast().expect("Cached computation was not of the correct type")
+            cc.value.clone().downcast().map(Ok).expect("Cached computation was not of the correct type")
         }
     }
 
