@@ -3,8 +3,9 @@ use proc_macro_error::*;
 use quote::quote;
 use syn::punctuated::Punctuated;
 use syn::{
-    Attribute, Expr, ExprField, ExprPath, ExprTuple, FnArg, ForeignItemFn, Index, ItemFn, Member,
-    Pat, PatIdent, PatType, Path, ReturnType, Signature, Token, Type, TypeTuple, Visibility,
+    Attribute, Expr, ExprField, ExprPath, ExprTuple, FnArg, ForeignItemFn, GenericArgument,
+    GenericParam, Index, ItemFn, Member, Pat, PatIdent, PatType, Path, ReturnType, Signature,
+    Token, Type, TypePath, TypeReference, TypeTuple, Visibility,
 };
 
 fn fn_arg_to_type(arg: &FnArg) -> &Type {
@@ -95,6 +96,46 @@ fn ident_to_expr(id: Ident) -> Expr {
     .into()
 }
 
+/// Converts generic arguments to generic params (effectively dismissing all ": ???" bounds)
+fn use_generic_args(
+    generics: &Punctuated<GenericParam, Token![,]>,
+) -> Punctuated<GenericArgument, Token![,]> {
+    generics
+        .iter()
+        .map(|p| match p {
+            GenericParam::Type(t) => GenericArgument::Type(
+                TypePath {
+                    qself: None,
+                    path: t.ident.clone().into(),
+                }
+                .into(),
+            ),
+            GenericParam::Lifetime(l) => GenericArgument::Lifetime(l.lifetime.clone()),
+            GenericParam::Const(c) => GenericArgument::Const(ident_to_expr(c.ident.clone())),
+        })
+        .collect()
+}
+
+fn generic_args_phantom(generics: &Punctuated<GenericArgument, Token![,]>) -> Type {
+    build_type_tuple(generics.iter().filter_map(|a| {
+        match a {
+            GenericArgument::Binding(_) => unreachable!(),
+            GenericArgument::Constraint(_) => unreachable!(),
+            GenericArgument::Type(t) => Some(t.clone()),
+            GenericArgument::Const(_) => None,
+            GenericArgument::Lifetime(lt) => Some(
+                TypeReference {
+                    lifetime: Some(lt.clone()),
+                    mutability: None,
+                    and_token: Default::default(),
+                    elem: Box::new(build_unit_tuple()),
+                }
+                .into(),
+            ),
+        }
+    }))
+}
+
 #[proc_macro_error]
 #[proc_macro_attribute]
 pub fn query(
@@ -177,6 +218,11 @@ pub fn query(
 
     let query_vis = &function.vis();
     let query_name = &function.sig().ident;
+    let generics = &function.sig().generics;
+    let generics_params = &generics.params;
+    let generics_where = &generics.where_clause;
+    let generics_args = use_generic_args(generics_params);
+    let generics_phantom = generic_args_phantom(&generics_args);
 
     let input_type = build_type_tuple(query_args.iter().cloned());
     let output_type = match &function.sig().output {
@@ -192,20 +238,26 @@ pub fn query(
     let calling_tuple_args = calling_tuple_args(calling_arg_names.iter().cloned().zip(query_args));
     let calling_tuple = build_ident_tuple(calling_arg_names.into_iter());
 
-    let to_impl = function.to_impl(query_arg_count).into_iter();
+    let to_impl = function
+        .to_impl(query_arg_count, generics_params, &generics_args)
+        .into_iter();
 
     let expanded = quote! {
         #(#query_attrs)*
-        #query_vis fn #query_name(#db_ident: &::yeter::Database, #calling_tuple_args) -> ::std::rc::Rc<#output_type> {
+        #query_vis fn #query_name<#generics_params>(#db_ident: &::yeter::Database, #calling_tuple_args) -> ::std::rc::Rc<#output_type>
+            #generics_where
+        {
             use ::yeter::QueryDef;
             #db_ident.run::<#query_name>(#calling_tuple)
         }
 
         #[allow(non_camel_case_types)]
         #[doc(hidden)]
-        #query_vis enum #query_name {}
+        #query_vis enum #query_name<#generics_params> {
+            Phantom(std::convert::Infallible, std::marker::PhantomData<#generics_phantom>),
+        }
 
-        impl ::yeter::QueryDef for #query_name {
+        impl<#generics_params> ::yeter::QueryDef for #query_name<#generics_args> #generics_where {
             type Input = #input_type;
             type Output = #output_type;
         }
@@ -222,7 +274,12 @@ trait FunctionItem {
     fn vis(&self) -> &Visibility;
     fn sig(&self) -> &Signature;
 
-    fn to_impl(&self, _query_arg_count: u32) -> Option<TokenStream> {
+    fn to_impl(
+        &self,
+        _query_arg_count: u32,
+        _generics_params: &Punctuated<GenericParam, Token![,]>,
+        _generics_args: &Punctuated<GenericArgument, Token![,]>,
+    ) -> Option<TokenStream> {
         None
     }
 }
@@ -254,7 +311,12 @@ impl FunctionItem for ItemFn {
         &self.sig
     }
 
-    fn to_impl(&self, query_arg_count: u32) -> Option<TokenStream> {
+    fn to_impl(
+        &self,
+        query_arg_count: u32,
+        generics_params: &Punctuated<GenericParam, Token!(,)>,
+        generics_args: &Punctuated<GenericArgument, Token!(,)>,
+    ) -> Option<TokenStream> {
         let query_name = &self.sig().ident;
         let db_ident = Ident::new("db", Span::mixed_site());
         let input_ident = Ident::new("input", Span::mixed_site());
@@ -280,9 +342,10 @@ impl FunctionItem for ItemFn {
         s.sig.ident = call_ident.clone();
 
         Some(quote! {
-            impl ::yeter::ImplementedQueryDef for #query_name {
+            impl<#generics_params> ::yeter::ImplementedQueryDef for #query_name<#generics_args> {
                 #[inline]
                 fn run(#db_ident: &::yeter::Database, #input_ident: Self::Input) -> Self::Output {
+                    #[allow(clippy::needless_lifetimes)]
                     #s
                     #call_ident(#db_ident, #calling_args)
                 }

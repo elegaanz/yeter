@@ -1,32 +1,15 @@
+mod constrained_fn;
+
+use constrained_fn::{AnyFn, into_erased};
 use std::{
     any::{Any, TypeId},
     collections::{hash_map::DefaultHasher, HashMap},
     hash::{Hash, Hasher},
-    sync::RwLock, rc::Rc, marker::PhantomData, cell::RefCell,
+    mem::MaybeUninit,
+    sync::RwLock, rc::Rc, cell::RefCell,
 };
 
 use state::Container;
-
-struct ConstrainedFn<A, O, F: Fn(&Database, A) -> O> {
-    f: F,
-    _arg: PhantomData<A>,
-    _out: PhantomData<O>,
-}
-
-trait AnyFn {
-    fn try_call(&self, db: &Database, arg: Box<dyn Any>) -> Option<Rc<dyn Any>>;
-}
-
-impl<A: 'static, O: 'static, F: Fn(&Database, A) -> O + 'static> AnyFn for ConstrainedFn<A, O, F> {
-    fn try_call(&self, db: &Database, arg: Box<dyn Any>) -> Option<Rc<dyn Any>> {
-        if let Ok(arg) = arg.downcast() {
-            Some(Rc::new((self.f)(db, *arg)))
-        } else {
-            None
-        }
-    }
-}
-
 
 /// A query definition
 ///
@@ -127,15 +110,10 @@ impl Database {
     where
         F: Fn(&Self, Q::Input) -> Q::Output + 'static,
         Q: QueryDef + 'static,
-        Q::Input: 'static,
         Q::Output: 'static,
     {
         let q = TypeId::of::<Q>();
-        let redefining = self.fns.insert(q, Box::new(ConstrainedFn {
-            f: Box::new(f),
-            _arg: PhantomData,
-            _out: PhantomData,
-        })).is_some();
+        let redefining = self.fns.insert(q, into_erased(Box::new(f))).is_some();
         let mut caches = self.caches.write().unwrap();
         if redefining {
             let cache = caches
@@ -162,7 +140,6 @@ impl Database {
     pub fn register_impl<Q>(&mut self)
     where
         Q: ImplementedQueryDef + 'static,
-        Q::Input: 'static,
         Q::Output: 'static,
     {
         self.register::<_, Q>(Q::run)
@@ -171,20 +148,20 @@ impl Database {
     /// Runs a query (or not if it the result is already in the cache)
     ///
     /// Panics if a query ends up in a cyclic computation
-    pub fn run<Q>(&self, i: Q::Input) -> Rc<Q::Output>
+    pub fn run<'input, Q>(&self, i: Q::Input) -> Rc<Q::Output>
     where
         Q: QueryDef + 'static,
-        Q::Input: Hash + 'static,
+        Q::Input: Hash + 'input,
         Q::Output: 'static,
     {
         self.try_run::<Q>(i).unwrap()
     }
 
     /// Tries to runs a query (or not if it the result is already in the cache)
-    pub fn try_run<Q>(&self, i: Q::Input) -> Result<Rc<Q::Output>, CycleError>
+    pub fn try_run<'input, Q>(&self, i: Q::Input) -> Result<Rc<Q::Output>, CycleError>
     where
         Q: QueryDef + 'static,
-        Q::Input: Hash + 'static,
+        Q::Input: Hash + 'input,
         Q::Output: 'static,
     {
         let q = &TypeId::of::<Q>();
@@ -256,7 +233,12 @@ impl Database {
             }
         };
 
-        let out = f.try_call(&self, Box::new(i)).unwrap();
+        let i = MaybeUninit::new(i);
+        let i_ptr = i.as_ptr();
+        let out = unsafe {
+            // SAFETY: i should be of the expected type of f's input
+            f.try_call(self, i_ptr)
+        };
 
         {
             let stack = self.stack.write();
