@@ -247,8 +247,7 @@ pub fn query(
         #query_vis fn #query_name<#generics_params>(#db_ident: &::yeter::Database, #calling_tuple_args) -> ::std::rc::Rc<#output_type>
             #generics_where
         {
-            use ::yeter::QueryDef;
-            #db_ident.run::<#query_name>(#calling_tuple)
+            #db_ident.run::<#query_name::<#generics_args>>(#calling_tuple)
         }
 
         #[allow(non_camel_case_types)]

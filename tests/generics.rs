@@ -24,8 +24,8 @@ fn types() {
     let mut db = Database::new();
     db.register_impl::<get_first::<_, [u8; 3]>>();
     db.register_impl::<get_first::<_, Vec<u16>>>();
-    assert_eq!(*get_first(&db, [1, 2, 3]), Some(1));
-    assert_eq!(*get_first(&db, vec![4, 5, 6]), Some(4));
+    assert_eq!(*get_first(&db, [1u8, 2, 3]), Some(1));
+    assert_eq!(*get_first(&db, vec![4u16, 5, 6]), Some(4));
 }
 
 #[yeter::query]
