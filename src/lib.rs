@@ -1,32 +1,17 @@
+mod constrained_fn;
+mod ns_type_id;
+
+use constrained_fn::{AnyFn, into_erased};
+use ns_type_id::NsTypeId;
 use std::{
-    any::{Any, TypeId},
+    any::Any,
     collections::{hash_map::DefaultHasher, HashMap},
     hash::{Hash, Hasher},
-    sync::RwLock, rc::Rc, marker::PhantomData, cell::RefCell,
+    mem::MaybeUninit,
+    sync::RwLock, rc::Rc, cell::RefCell,
 };
 
 use state::Container;
-
-struct ConstrainedFn<A, O, F: Fn(&Database, A) -> O> {
-    f: F,
-    _arg: PhantomData<A>,
-    _out: PhantomData<O>,
-}
-
-trait AnyFn {
-    fn try_call(&self, db: &Database, arg: Box<dyn Any>) -> Option<Rc<dyn Any>>;
-}
-
-impl<A: 'static, O: 'static, F: Fn(&Database, A) -> O + 'static> AnyFn for ConstrainedFn<A, O, F> {
-    fn try_call(&self, db: &Database, arg: Box<dyn Any>) -> Option<Rc<dyn Any>> {
-        if let Ok(arg) = arg.downcast() {
-            Some(Rc::new((self.f)(db, *arg)))
-        } else {
-            None
-        }
-    }
-}
-
 
 /// A query definition
 ///
@@ -55,14 +40,14 @@ type RcAny = Rc<dyn Any + 'static>;
 #[derive(Default)]
 pub struct Database {
     /// Registered queries
-    fns: HashMap<TypeId, Box<dyn AnyFn>>,
+    fns: HashMap<NsTypeId, Box<dyn AnyFn>>,
     /// The caches
     ///
     /// It associates a query name with its cache.
     /// A query cache associates an input hash with the corresponding output.
-    caches: RwLock<HashMap<TypeId, HashMap<u64, RcAny>>>,
+    caches: RwLock<HashMap<NsTypeId, HashMap<u64, RcAny>>>,
     /// Current call stack, to track dependencies
-    stack: RwLock<Vec<(TypeId, u64)>>,
+    stack: RwLock<Vec<(NsTypeId, u64)>>,
     /// Effects that have been executed by the current query
     effects: RwLock<state::Container![Send]>,
 }
@@ -73,7 +58,7 @@ struct CachedComputation {
     /// The version of this item (starts at 1 and goes up with every recomputation)
     version: usize,
     /// The other query calls this computation depends on
-    dependencies: Vec<(TypeId, u64)>,
+    dependencies: Vec<(NsTypeId, u64)>,
     /// The output
     value: RcAny,
     /// Saved side effects
@@ -126,16 +111,11 @@ impl Database {
     pub fn register<F, Q>(&mut self, f: F)
     where
         F: Fn(&Self, Q::Input) -> Q::Output + 'static,
-        Q: QueryDef + 'static,
-        Q::Input: 'static,
+        Q: QueryDef,
         Q::Output: 'static,
     {
-        let q = TypeId::of::<Q>();
-        let redefining = self.fns.insert(q, Box::new(ConstrainedFn {
-            f: Box::new(f),
-            _arg: PhantomData,
-            _out: PhantomData,
-        })).is_some();
+        let q = NsTypeId::of::<Q>();
+        let redefining = self.fns.insert(q, into_erased(Box::new(f))).is_some();
         let mut caches = self.caches.write().unwrap();
         if redefining {
             let cache = caches
@@ -162,7 +142,6 @@ impl Database {
     pub fn register_impl<Q>(&mut self)
     where
         Q: ImplementedQueryDef + 'static,
-        Q::Input: 'static,
         Q::Output: 'static,
     {
         self.register::<_, Q>(Q::run)
@@ -171,23 +150,23 @@ impl Database {
     /// Runs a query (or not if it the result is already in the cache)
     ///
     /// Panics if a query ends up in a cyclic computation
-    pub fn run<Q>(&self, i: Q::Input) -> Rc<Q::Output>
+    pub fn run<'input, Q>(&self, i: Q::Input) -> Rc<Q::Output>
     where
-        Q: QueryDef + 'static,
-        Q::Input: Hash + 'static,
+        Q: QueryDef,
+        Q::Input: Hash + 'input,
         Q::Output: 'static,
     {
         self.try_run::<Q>(i).unwrap()
     }
 
     /// Tries to runs a query (or not if it the result is already in the cache)
-    pub fn try_run<Q>(&self, i: Q::Input) -> Result<Rc<Q::Output>, CycleError>
+    pub fn try_run<'input, Q>(&self, i: Q::Input) -> Result<Rc<Q::Output>, CycleError>
     where
-        Q: QueryDef + 'static,
-        Q::Input: Hash + 'static,
+        Q: QueryDef,
+        Q::Input: Hash + 'input,
         Q::Output: 'static,
     {
-        let q = &TypeId::of::<Q>();
+        let q = &NsTypeId::of::<Q>();
         let f = self.fns.get(q).expect("Unknown query");
 
         let mut hasher = DefaultHasher::new();
@@ -256,7 +235,12 @@ impl Database {
             }
         };
 
-        let out = f.try_call(&self, Box::new(i)).unwrap();
+        let i = MaybeUninit::new(i);
+        let i_ptr = i.as_ptr();
+        let out = unsafe {
+            // SAFETY: i should be of the expected type of f's input
+            f.try_call(self, i_ptr)
+        };
 
         {
             let stack = self.stack.write();
