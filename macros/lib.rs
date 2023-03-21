@@ -198,7 +198,7 @@ pub fn query(
         #(#query_attrs)*
         #query_vis fn #query_name(#db_ident: &::yeter::Database, #calling_tuple_args) -> ::std::rc::Rc<#output_type> {
             use ::yeter::QueryDef;
-            #db_ident.run::<#input_type, #output_type>(#query_name::PATH, #calling_tuple)
+            #db_ident.run::<#query_name>(#calling_tuple)
         }
 
         #[allow(non_camel_case_types)]
@@ -206,7 +206,6 @@ pub fn query(
         #query_vis enum #query_name {}
 
         impl ::yeter::QueryDef for #query_name {
-            const PATH: &'static str = stringify!(#query_name);
             type Input = #input_type;
             type Output = #output_type;
         }

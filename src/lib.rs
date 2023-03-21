@@ -1,5 +1,5 @@
 use std::{
-    any::Any,
+    any::{Any, TypeId},
     collections::{hash_map::DefaultHasher, HashMap},
     hash::{Hash, Hasher},
     sync::RwLock, rc::Rc, marker::PhantomData, cell::RefCell,
@@ -33,8 +33,6 @@ impl<A: 'static, O: 'static, F: Fn(&Database, A) -> O + 'static> AnyFn for Const
 /// Implementations can be created with [`#[yeter::query]`][query] and can be registered with
 /// [`Database::register`].
 pub trait QueryDef {
-    /// The path of the query
-    const PATH: &'static str;
     /// Input type
     type Input;
     /// Output type
@@ -49,20 +47,22 @@ pub trait ImplementedQueryDef: QueryDef {
     fn run(db: &Database, input: Self::Input) -> Self::Output;
 }
 
+type RcAny = Rc<dyn Any + 'static>;
+
 /// The main type to interact with Yéter
 ///
 /// This structure holds a list of registered queries and their respective caches.
 #[derive(Default)]
 pub struct Database {
     /// Registered queries
-    fns: HashMap<&'static str, Box<dyn AnyFn>>,
+    fns: HashMap<TypeId, Box<dyn AnyFn>>,
     /// The caches
     ///
     /// It associates a query name with its cache.
     /// A query cache associates an input hash with the corresponding output.
-    caches: RwLock<HashMap<&'static str, HashMap<u64, Rc<dyn Any + 'static>>>>,
+    caches: RwLock<HashMap<TypeId, HashMap<u64, RcAny>>>,
     /// Current call stack, to track dependencies
-    stack: RwLock<Vec<(&'static str, u64)>>,
+    stack: RwLock<Vec<(TypeId, u64)>>,
     /// Effects that have been executed by the current query
     effects: RwLock<state::Container![Send]>,
 }
@@ -73,9 +73,9 @@ struct CachedComputation {
     /// The version of this item (starts at 1 and goes up with every recomputation)
     version: usize,
     /// The other query calls this computation depends on
-    dependencies: Vec<(&'static str, u64)>,
+    dependencies: Vec<(TypeId, u64)>,
     /// The output
-    value: Rc<dyn Any + 'static>,
+    value: RcAny,
     /// Saved side effects
     effects: state::Container![Send],
     /// Wheter or not the associated query was redefined. If true, this cache item
@@ -83,7 +83,7 @@ struct CachedComputation {
     redefined: bool,
 }
 
-/// Error returned by [Database::try_run] when a 
+/// Error returned by [Database::try_run] when a
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CycleError;
 
@@ -126,11 +126,12 @@ impl Database {
     pub fn register<F, Q>(&mut self, f: F)
     where
         F: Fn(&Self, Q::Input) -> Q::Output + 'static,
-        Q: QueryDef,
+        Q: QueryDef + 'static,
         Q::Input: 'static,
         Q::Output: 'static,
     {
-        let redefining = self.fns.insert(Q::PATH, Box::new(ConstrainedFn {
+        let q = TypeId::of::<Q>();
+        let redefining = self.fns.insert(q, Box::new(ConstrainedFn {
             f: Box::new(f),
             _arg: PhantomData,
             _out: PhantomData,
@@ -138,7 +139,7 @@ impl Database {
         let mut caches = self.caches.write().unwrap();
         if redefining {
             let cache = caches
-                .get_mut(Q::PATH)
+                .get_mut(&q)
                 .expect("A query is missing its associated cache");
             for cc in cache.values_mut() {
                 let cc_res = Rc::get_mut(cc).and_then(|c| c.downcast_mut());
@@ -147,7 +148,7 @@ impl Database {
                 cc.redefined = true;
             }
         } else {
-            caches.insert(Q::PATH, HashMap::new());
+            caches.insert(q, HashMap::new());
         }
     }
 
@@ -168,22 +169,25 @@ impl Database {
     }
 
     /// Runs a query (or not if it the result is already in the cache)
-    /// 
+    ///
     /// Panics if a query ends up in a cyclic computation
-    pub fn run<I, O>(&self, q: &'static str, i: I) -> Rc<O>
-        where
-            I: Hash + 'static,
-            O: 'static,
+    pub fn run<Q>(&self, i: Q::Input) -> Rc<Q::Output>
+    where
+        Q: QueryDef + 'static,
+        Q::Input: Hash + 'static,
+        Q::Output: 'static,
     {
-        self.try_run(q, i).unwrap()
+        self.try_run::<Q>(i).unwrap()
     }
 
     /// Tries to runs a query (or not if it the result is already in the cache)
-    pub fn try_run<I, O>(&self, q: &'static str, i: I) -> Result<Rc<O>, CycleError>
+    pub fn try_run<Q>(&self, i: Q::Input) -> Result<Rc<Q::Output>, CycleError>
     where
-        I: Hash + 'static,
-        O: 'static,
+        Q: QueryDef + 'static,
+        Q::Input: Hash + 'static,
+        Q::Output: 'static,
     {
+        let q = &TypeId::of::<Q>();
         let f = self.fns.get(q).expect("Unknown query");
 
         let mut hasher = DefaultHasher::new();
@@ -241,14 +245,14 @@ impl Database {
         {
             let mut stack = self.stack.write().unwrap();
             let stack_top = stack.iter().last().cloned();
-            stack.push((q, input_hash));
+            stack.push((*q, input_hash));
 
             if let Some(stack_top) = stack_top {
                 let mut caches = self.caches.write().unwrap();
-                let cache = caches.get_mut(stack_top.0).unwrap();
+                let cache = caches.get_mut(&stack_top.0).unwrap();
                 let cc = cache.get_mut(&stack_top.1).unwrap();
                 let cc: &mut CachedComputation = Rc::get_mut(cc).unwrap().downcast_mut().unwrap();
-                cc.dependencies.push((q, input_hash));
+                cc.dependencies.push((*q, input_hash));
             }
         };
 
