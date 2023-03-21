@@ -1,6 +1,9 @@
 mod string {
     #[yeter::query]
-    pub fn len(_db: &yeter::Database, input: String) -> usize {
+    pub fn len(db: &yeter::Database, input: String) -> usize {
+        if input.is_empty() {
+            db.do_effect("Empty string");
+        }
         input.len()
     }
 }
