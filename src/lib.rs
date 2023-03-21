@@ -1,14 +1,16 @@
 mod constrained_fn;
 mod ns_type_id;
 
-use constrained_fn::{AnyFn, into_erased};
+use constrained_fn::{into_erased, AnyFn};
 use ns_type_id::NsTypeId;
 use std::{
     any::Any,
+    cell::RefCell,
     collections::{hash_map::DefaultHasher, HashMap},
     hash::{Hash, Hasher},
     mem::MaybeUninit,
-    sync::RwLock, rc::Rc, cell::RefCell,
+    rc::Rc,
+    sync::RwLock,
 };
 
 use state::Container;
@@ -86,7 +88,10 @@ impl CachedComputation {
     }
 
     fn is_uninit(&self) -> bool {
-        matches!(self.value.downcast_ref::<UninitCachedComputationValue>(), Some(UninitCachedComputationValue))
+        matches!(
+            self.value.downcast_ref::<UninitCachedComputationValue>(),
+            Some(UninitCachedComputationValue)
+        )
     }
 }
 
@@ -166,6 +171,8 @@ impl Database {
         Q::Input: Hash + 'input,
         Q::Output: 'static,
     {
+        // TODO(autoreg): add a way to run an input query, i.e a query that has no producer function
+        //                and that just looks up values in the cache
         let q = &NsTypeId::of::<Q>();
         let f = self.fns.get(q).expect("Unknown query");
 
@@ -257,18 +264,25 @@ impl Database {
             let cc: &mut CachedComputation = Rc::get_mut(cc).unwrap().downcast_mut().unwrap();
             cc.effects = effects;
             cc.value = out;
-            cc.value.clone().downcast().map(Ok).expect("Cached computation was not of the correct type")
+            cc.value
+                .clone()
+                .downcast()
+                .map(Ok)
+                .expect("Cached computation was not of the correct type")
         }
     }
 
     /// Returns a side effect collection
     pub fn effect<'a, T: 'static + Clone>(&'a self) -> Vec<T> {
         let caches = self.caches.read().unwrap();
-        caches.values()
+        caches
+            .values()
             .flat_map(|x| x.values())
             .filter_map(|x| {
-                let cc: Rc<CachedComputation> = Rc::clone(x).downcast().expect("Database::effect: invalid cache");
-                let cell  = cc.effects.try_get::<RefCell<Vec<T>>>()?.borrow();
+                let cc: Rc<CachedComputation> = Rc::clone(x)
+                    .downcast()
+                    .expect("Database::effect: invalid cache");
+                let cell = cc.effects.try_get::<RefCell<Vec<T>>>()?.borrow();
                 Some(cell.clone())
             })
             .flatten()
@@ -284,6 +298,37 @@ impl Database {
         let vec = effects.get::<RefCell<Vec<T>>>();
         let mut vec = vec.borrow_mut();
         vec.push(eff);
+    }
+
+    pub fn set<'input, Q, I, O>(&self, input: Q::Input, output: Q::Output)
+    where
+        Q: QueryDef,
+        Q::Input: Hash + 'input,
+        Q::Output: Any + 'static,
+    {
+        // TODO(autoreg): auto register Q if needed
+        let q = &NsTypeId::of::<Q>();
+
+        let mut hasher = DefaultHasher::new();
+        input.hash(&mut hasher);
+        let input_hash = hasher.finish();
+
+        let output: Rc<dyn Any> = Rc::new(output);
+
+        let default_cc = Rc::new(CachedComputation {
+            version: 1,
+            dependencies: Vec::new(),
+            value: Rc::clone(&output),
+            effects: <state::Container![Send]>::new(),
+            redefined: false,
+        });
+
+        let mut caches = self.caches.write().unwrap();
+        let cache = caches.get_mut(q).expect("Unknown query cache");
+        let cc = cache.entry(input_hash)
+            .or_insert(default_cc);
+        let cc_mut: &mut CachedComputation = Rc::get_mut(cc).unwrap().downcast_mut().unwrap();
+        cc_mut.value = output;       
     }
 }
 
