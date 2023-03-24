@@ -42,7 +42,7 @@ pub struct Database {
     ///
     /// It associates a query name with its cache.
     /// A query cache associates an input hash with the corresponding output.
-    caches: RwLock<HashMap<NsTypeId, HashMap<u64, RcAny>>>,
+    caches: RwLock<HashMap<NsTypeId, HashMap<u64, CachedComputation>>>,
     /// Current call stack, to track dependencies
     stack: RwLock<Vec<(NsTypeId, u64)>>,
     /// Effects that have been executed by the current query
@@ -127,21 +127,17 @@ impl Database {
             let caches = self.caches.read().unwrap();
             let cache = caches.get(&q);
             if let Some(c) = cache.and_then(|c| c.get(&input_hash)) {
-                let c: Rc<CachedComputation> = c.clone().downcast().unwrap();
                 if !c.redefined {
                     let newest_dep = c
                         .dependencies
                         .iter()
                         .map(|(f, k)| {
-                            let dep: Rc<CachedComputation> = caches
+                            caches
                                 .get(f)
                                 .expect("Uknown query (dependency of another query)")
                                 .get(k)
                                 .expect("A cached computation has a non-cached dependency")
-                                .clone()
-                                .downcast()
-                                .unwrap();
-                            dep.version
+                                .version
                         })
                         .max()
                         .unwrap_or(1);
@@ -166,7 +162,7 @@ impl Database {
 
         {
             let mut caches = self.caches.write().unwrap();
-            let cc = Rc::new(CachedComputation::new(old_version + 1));
+            let cc = CachedComputation::new(old_version + 1);
             let cache = caches.entry(q).or_default();
             cache.insert(input_hash, cc);
         };
@@ -180,7 +176,6 @@ impl Database {
                 let mut caches = self.caches.write().unwrap();
                 let cache = caches.get_mut(&stack_top.0).unwrap();
                 let cc = cache.get_mut(&stack_top.1).unwrap();
-                let cc: &mut CachedComputation = Rc::get_mut(cc).unwrap().downcast_mut().unwrap();
                 cc.dependencies.push((q, input_hash));
             }
         };
@@ -199,7 +194,6 @@ impl Database {
             let mut caches = self.caches.write().unwrap();
             let cache = caches.get_mut(&q).unwrap();
             let cc = cache.get_mut(&input_hash).unwrap();
-            let cc: &mut CachedComputation = Rc::get_mut(cc).unwrap().downcast_mut().unwrap();
             cc.effects = effects;
             cc.value = out;
             cc.value
@@ -216,10 +210,7 @@ impl Database {
         caches
             .values()
             .flat_map(|x| x.values())
-            .filter_map(|x| {
-                let cc: Rc<CachedComputation> = Rc::clone(x)
-                    .downcast()
-                    .expect("Database::effect: invalid cache");
+            .filter_map(|cc| {
                 let cell = cc.effects.try_get::<RefCell<Vec<T>>>()?.borrow();
                 Some(cell.clone())
             })
@@ -253,19 +244,18 @@ impl Database {
 
         let output: Rc<dyn Any> = Rc::new(output);
 
-        let default_cc = Rc::new(CachedComputation {
+        let default_cc = CachedComputation {
             version: 1,
             dependencies: Vec::new(),
             value: Rc::clone(&output),
             effects: <state::Container![Send]>::new(),
             redefined: false,
-        });
+        };
 
         let mut caches = self.caches.write().unwrap();
         let cache = caches.entry(q).or_default();
         let cc = cache.entry(input_hash).or_insert(default_cc);
-        let cc_mut: &mut CachedComputation = Rc::get_mut(cc).unwrap().downcast_mut().unwrap();
-        cc_mut.value = output;
+        cc.value = output;
     }
 }
 
