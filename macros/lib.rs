@@ -3,9 +3,10 @@ use proc_macro_error::*;
 use quote::quote;
 use syn::punctuated::Punctuated;
 use syn::{
-    Attribute, Expr, ExprField, ExprPath, ExprTuple, FnArg, ForeignItemFn, GenericArgument,
-    GenericParam, Index, ItemFn, Member, Pat, PatIdent, PatType, Path, ReturnType, Signature,
-    Token, Type, TypePath, TypeReference, TypeTuple, Visibility,
+    parse_quote, Attribute, Expr, ExprField, ExprPath, ExprTuple, FnArg, ForeignItemFn,
+    GenericArgument, GenericParam, Index, ItemFn, Member, Pat, PatIdent, PatType, Path,
+    PathArguments, PathSegment, ReturnType, Signature, Token, Type, TypePath, TypeReference,
+    TypeTuple, Visibility, WhereClause,
 };
 
 fn fn_arg_to_type(arg: &FnArg) -> &Type {
@@ -174,7 +175,7 @@ pub fn query(
         .collect::<Vec<_>>();
 
     let db_ident_fallback = Ident::new("db", Span::call_site());
-    let db_ident = match fn_args.first() {
+    match fn_args.first() {
         // self, &self, &mut self
         Some(receiver @ FnArg::Receiver(_)) => {
             emit_error!(
@@ -238,16 +239,27 @@ pub fn query(
     let calling_tuple_args = calling_tuple_args(calling_arg_names.iter().cloned().zip(query_args));
     let calling_tuple = build_ident_tuple(calling_arg_names.into_iter());
 
-    let to_impl = function
-        .to_impl(query_arg_count, generics_params, &generics_args)
-        .into_iter();
+    let call_ident_span = Span::call_site().located_at(query_name.span());
+    // When Span::def_site is stable, we will be able to properly create hygienic idents
+    let call_ident = Ident::new(&format!("__yeter_{query_name}"), call_ident_span);
+
+    let to_function_impl = function.to_function_impl(&call_ident, generics_params, output_type);
+    let to_function_call = function.to_function_call(&call_ident, query_arg_count);
+    let to_additional_impl = function.to_additional_impl(
+        query_name,
+        generics_params,
+        &generics_args,
+        generics_where,
+        output_type,
+    );
 
     let expanded = quote! {
         #(#query_attrs)*
-        #query_vis fn #query_name<#generics_params>(#db_ident: &::yeter::Database, #calling_tuple_args) -> ::std::rc::Rc<#output_type>
+        #query_vis fn #query_name<#generics_params>(db: &::yeter::Database, #calling_tuple_args) -> ::std::rc::Rc<#output_type>
             #generics_where
         {
-            #db_ident.run::<#query_name::<#generics_args>>(#calling_tuple)
+            #to_function_impl
+            db.run::<_, #query_name::<#generics_args>>(#to_function_call, #calling_tuple)
         }
 
         #[allow(non_camel_case_types)]
@@ -261,7 +273,7 @@ pub fn query(
             type Output = #output_type;
         }
 
-        #(#to_impl)*
+        #to_additional_impl
     };
 
     set_dummy(expanded.clone()); // Still produce these tokens if an error was emitted
@@ -273,14 +285,54 @@ trait FunctionItem {
     fn vis(&self) -> &Visibility;
     fn sig(&self) -> &Signature;
 
-    fn to_impl(
+    fn to_function_impl(
         &self,
-        _query_arg_count: u32,
+        _call_ident: &Ident,
+        _generics_params: &Punctuated<GenericParam, Token![,]>,
+        _output_type: &Type,
+    ) -> TokenStream {
+        quote! {}
+    }
+
+    fn to_function_call(&self, _call_ident: &Ident, _query_arg_count: u32) -> TokenStream;
+
+    fn to_additional_impl(
+        &self,
+        _query_name: &Ident,
         _generics_params: &Punctuated<GenericParam, Token![,]>,
         _generics_args: &Punctuated<GenericArgument, Token![,]>,
-    ) -> Option<TokenStream> {
-        None
+        _generics_where: &Option<WhereClause>,
+        _output_type: &Type,
+    ) -> TokenStream {
+        quote! {}
     }
+}
+
+fn guess_option_inner_type(option: &Type) -> Type {
+    if let Type::Path(path) = option {
+        match path.path.segments.last() {
+            Some(seg) if seg.ident != "Option" => {
+                emit_error!(seg.ident, "expected `Option` type",);
+            }
+            Some(PathSegment {
+                arguments: PathArguments::AngleBracketed(angle),
+                ..
+            }) if angle.args.len() == 1 => match angle.args.first().unwrap() {
+                GenericArgument::Type(t) => return t.clone(),
+                o => {
+                    emit_error!(o, "unexpected generic argument for Option type",);
+                }
+            },
+            Some(seg) => {
+                emit_error!(seg, "expected Option<T> return type",);
+            }
+            None => {
+                emit_error!(path, "expected Option<T> return type",);
+            }
+        }
+    };
+
+    parse_quote! { Option<()> }
 }
 
 impl FunctionItem for ForeignItemFn {
@@ -294,6 +346,30 @@ impl FunctionItem for ForeignItemFn {
 
     fn sig(&self) -> &Signature {
         &self.sig
+    }
+
+    fn to_function_call(&self, _call_ident: &Ident, _query_arg_count: u32) -> TokenStream {
+        quote! {
+            |_db, _input| None
+        }
+    }
+
+    fn to_additional_impl(
+        &self,
+        query_name: &Ident,
+        generics_params: &Punctuated<GenericParam, Token![,]>,
+        generics_args: &Punctuated<GenericArgument, Token![,]>,
+        generics_where: &Option<WhereClause>,
+        output_type: &Type,
+    ) -> TokenStream {
+        // Output should be an option; we try to guess what could be inside
+        let output_type = guess_option_inner_type(output_type);
+
+        quote! {
+            impl<#generics_params> ::yeter::InputQueryDef for #query_name<#generics_args> #generics_where {
+                type OptionalOutput = #output_type;
+            }
+        }
     }
 }
 
@@ -310,13 +386,22 @@ impl FunctionItem for ItemFn {
         &self.sig
     }
 
-    fn to_impl(
+    fn to_function_impl(
         &self,
-        query_arg_count: u32,
-        generics_params: &Punctuated<GenericParam, Token!(,)>,
-        generics_args: &Punctuated<GenericArgument, Token!(,)>,
-    ) -> Option<TokenStream> {
-        let query_name = &self.sig().ident;
+        call_ident: &Ident,
+        _generics_params: &Punctuated<GenericParam, Token![,]>,
+        _output_type: &Type,
+    ) -> TokenStream {
+        let mut s = self.clone();
+        s.sig.ident = call_ident.clone();
+
+        quote! {
+            #[allow(clippy::needless_lifetimes)]
+            #s
+        }
+    }
+
+    fn to_function_call(&self, call_ident: &Ident, query_arg_count: u32) -> TokenStream {
         let db_ident = Ident::new("db", Span::mixed_site());
         let input_ident = Ident::new("input", Span::mixed_site());
         let input_ident_expr = Box::new(ident_to_expr(input_ident.clone()));
@@ -334,21 +419,8 @@ impl FunctionItem for ItemFn {
             })
             .collect::<Punctuated<_, Token![,]>>();
 
-        let call_ident_span = Span::call_site().located_at(query_name.span());
-        // When Span::def_site is stable, we will be able to properly create hygienic idents
-        let call_ident = Ident::new(&format!("__yeter_{query_name}"), call_ident_span);
-        let mut s = self.clone();
-        s.sig.ident = call_ident.clone();
-
-        Some(quote! {
-            impl<#generics_params> ::yeter::ImplementedQueryDef for #query_name<#generics_args> {
-                #[inline]
-                fn run(#db_ident: &::yeter::Database, #input_ident: Self::Input) -> Self::Output {
-                    #[allow(clippy::needless_lifetimes)]
-                    #s
-                    #call_ident(#db_ident, #calling_args)
-                }
-            }
-        })
+        quote! {
+            |#db_ident, #input_ident| #call_ident(#db_ident, #calling_args)
+        }
     }
 }

@@ -1,22 +1,18 @@
 #[yeter::query]
-fn list(_db: &yeter::Database) -> Vec<usize> {
-    vec![1, 2, 3]
-}
+fn list(_db: &yeter::Database) -> Option<Vec<usize>>;
 
 #[yeter::query]
 fn sum(db: &yeter::Database) -> usize {
-    list(db).iter().sum()
+    let list = list(db);
+    list.as_ref().as_deref().unwrap_or_default().iter().sum()
 }
 
 fn main() {
-    let mut db = yeter::Database::new();
+    let db = yeter::Database::new();
 
-    db.register_impl::<list>();
-    db.register_impl::<sum>();
-
+    db.set::<list>((), Some(vec![1, 2, 3]));
     assert_eq!(*sum(&db), 6);
 
-    db.register::<_, list>(|_db, ()| vec![]);
-
+    db.set::<list>((), Some(vec![]));
     assert_eq!(*sum(&db), 0);
 }

@@ -1,18 +1,30 @@
 use yeter::Database;
 
 #[yeter::query]
-fn setable_query(db: &Database, input: String) -> String;
+fn setable_query(db: &Database, input: String) -> Option<String>;
 
 #[yeter::query]
 fn id(db: &Database, input: String) -> String {
-    setable_query(db, input).to_string()
+    let rc = setable_query(db, input);
+    Option::as_ref(&rc).unwrap().to_string()
 }
 
-fn main() {
-    let mut db = Database::new();
+#[test]
+fn simple_1_keyed() {
+    let db = Database::new();
+    db.set::<setable_query>(("Bob".into(),), Some("123".into()));
+    assert!(String::eq(&id(&db, "Bob".into()), "123"));
+}
 
-    // TODO(autoreg): this is not working, but once auto registering it won't be needed anymore
-    db.register_impl::<setable_query>();
+#[yeter::query]
+fn pixel(db: &Database, x: usize, y: usize) -> Option<u8>;
 
-    db.register_impl::<id>();
+#[test]
+fn simple_2_keyed() {
+    let db = Database::new();
+    db.set::<pixel>((3, 3), Some(3));
+    db.set::<pixel>((3, 4), Some(4));
+    assert_eq!(*pixel(&db, 0, 0), None);
+    assert_eq!(*pixel(&db, 3, 4), Some(4));
+    assert_eq!(*pixel(&db, 3, 3), Some(3));
 }
