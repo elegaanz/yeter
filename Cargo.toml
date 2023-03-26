@@ -6,7 +6,8 @@ description = "KISS incremental computation framework"
 license = "GPL-3.0"
 
 [dependencies]
-state = "0.5"
+anymap2 = "0.13.0"
+thread_local = "1.1.7"
 yeter-macros = { path = "macros", version = "0.4.0" }
 
 [workspace]

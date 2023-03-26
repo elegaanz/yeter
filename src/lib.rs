@@ -10,7 +10,9 @@ use std::{
     sync::RwLock,
 };
 
-use state::Container;
+use thread_local::ThreadLocal;
+
+type AnyMap = anymap2::Map<dyn anymap2::any::Any + Send>;
 
 /// A query definition
 ///
@@ -44,9 +46,9 @@ pub struct Database {
     /// A query cache associates an input hash with the corresponding output.
     caches: RwLock<HashMap<NsTypeId, HashMap<u64, CachedComputation>>>,
     /// Current call stack, to track dependencies
-    stack: RwLock<Vec<(NsTypeId, u64)>>,
+    stack: ThreadLocal<RefCell<Vec<(NsTypeId, u64)>>>,
     /// Effects that have been executed by the current query
-    effects: RwLock<state::Container![Send]>,
+    effects: ThreadLocal<RefCell<AnyMap>>,
 }
 
 /// A cache item
@@ -59,7 +61,7 @@ struct CachedComputation {
     /// The output
     value: RcAny,
     /// Saved side effects
-    effects: state::Container![Send],
+    effects: AnyMap,
     /// Wheter or not the associated query was redefined. If true, this cache item
     /// is invalid and should be recomputed.
     redefined: bool,
@@ -78,7 +80,17 @@ impl CachedComputation {
             dependencies: vec![],
             value: Rc::new(UninitCachedComputationValue),
             redefined: false,
-            effects: <state::Container![Send]>::new(),
+            effects: AnyMap::new(),
+        }
+    }
+
+    fn new_init(version: usize, value: Rc<dyn Any>) -> Self {
+        CachedComputation {
+            version,
+            dependencies: Vec::new(),
+            value,
+            redefined: false,
+            effects: AnyMap::new(),
         }
     }
 
@@ -168,7 +180,7 @@ impl Database {
         };
 
         {
-            let mut stack = self.stack.write().unwrap();
+            let mut stack = self.stack.get_or_default().borrow_mut();
             let stack_top = stack.iter().last().cloned();
             stack.push((q, input_hash));
 
@@ -183,13 +195,13 @@ impl Database {
         let out = Rc::new(f(self, i));
 
         {
-            let stack = self.stack.write();
-            stack.unwrap().pop();
+            let mut stack = self.stack.get_or_default().borrow_mut();
+            stack.pop();
         }
 
         {
-            let mut effects = self.effects.write().unwrap();
-            let effects = std::mem::replace(&mut *effects, <Container![Send]>::new());
+            let mut effects = self.effects.get_or_default().borrow_mut();
+            let effects = std::mem::take(&mut *effects);
 
             let mut caches = self.caches.write().unwrap();
             let cache = caches.get_mut(&q).unwrap();
@@ -205,13 +217,13 @@ impl Database {
     }
 
     /// Returns a side effect collection
-    pub fn effect<'a, T: 'static + Clone>(&'a self) -> Vec<T> {
+    pub fn effect<T: 'static + Clone + Send>(&self) -> Vec<T> {
         let caches = self.caches.read().unwrap();
         caches
             .values()
             .flat_map(|x| x.values())
             .filter_map(|cc| {
-                let cell = cc.effects.try_get::<RefCell<Vec<T>>>()?.borrow();
+                let cell = cc.effects.get::<Vec<T>>()?;
                 Some(cell.clone())
             })
             .flatten()
@@ -220,12 +232,8 @@ impl Database {
 
     /// Produces a side effect
     pub fn do_effect<T: 'static + Clone + Send>(&self, eff: T) {
-        let effects = self.effects.write().unwrap();
-        if effects.try_get::<RefCell<Vec<T>>>().is_none() {
-            effects.set::<RefCell<Vec<T>>>(RefCell::new(Vec::new()));
-        }
-        let vec = effects.get::<RefCell<Vec<T>>>();
-        let mut vec = vec.borrow_mut();
+        let mut effects = self.effects.get_or_default().borrow_mut();
+        let vec = effects.entry::<Vec<T>>().or_default();
         vec.push(eff);
     }
 
@@ -244,13 +252,7 @@ impl Database {
 
         let output: Rc<dyn Any> = Rc::new(output);
 
-        let default_cc = CachedComputation {
-            version: 1,
-            dependencies: Vec::new(),
-            value: Rc::clone(&output),
-            effects: <state::Container![Send]>::new(),
-            redefined: false,
-        };
+        let default_cc = CachedComputation::new_init(1, output.clone());
 
         let mut caches = self.caches.write().unwrap();
         let cache = caches.entry(q).or_default();
