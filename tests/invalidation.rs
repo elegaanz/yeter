@@ -7,7 +7,8 @@ fn sum(db: &yeter::Database) -> usize {
     list.as_ref().as_deref().unwrap_or_default().iter().sum()
 }
 
-fn main() {
+#[test]
+fn invalidate_input() {
     let db = yeter::Database::new();
 
     db.set::<list>((), Some(vec![1, 2, 3]));
