@@ -9,8 +9,7 @@ mod string {
 }
 
 fn main() {
-    let mut db = yeter::Database::new();
-    db.register_impl::<string::len>();
+    let db = yeter::Database::new();
     let len1 = string::len(&db, "".into());
     for msg in db.effect::<&'static str>() {
         println!("EFFECT [1]: {}", msg);

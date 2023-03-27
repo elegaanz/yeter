@@ -16,9 +16,7 @@ fn depends_on_a(db: &Database) -> usize {
 #[test]
 #[should_panic(expected = "Cycle")]
 fn disallow() {
-    let mut db = Database::new();
-    db.register_impl::<a>();
-    db.register_impl::<depends_on_a>();
+    let db = Database::new();
 
     // This cannot be evaluated
     dbg!(a(&db));
@@ -41,7 +39,6 @@ fn fib_r(db: &Database, idx: u64) -> std::rc::Rc<u64> {
 
 #[test]
 fn allow_if_different_input() {
-    let mut db = Database::new();
-    db.register_impl::<fib>();
+    let db = Database::new();
     assert_eq!(*fib(&db, 15), 610);
 }

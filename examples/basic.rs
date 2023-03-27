@@ -6,8 +6,7 @@ mod string {
 }
 
 fn main() {
-    let mut db = yeter::Database::new();
-    db.register_impl::<string::len>();
+    let db = yeter::Database::new();
     let len1 = string::len(&db, "hello".into());
     let len2 = string::len(&db, "hello".into());
     let len3 = string::len(&db, "world".into());
