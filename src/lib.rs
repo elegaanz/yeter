@@ -135,6 +135,19 @@ impl Database {
         i.hash(&mut hasher);
         let input_hash = hasher.finish();
 
+        {
+            let mut stack = self.stack.get_or_default().borrow_mut();
+            let stack_top = stack.iter().last().cloned();
+            stack.push((q, input_hash));
+
+            if let Some(stack_top) = stack_top {
+                let mut caches = self.caches.write().unwrap();
+                let cache = caches.get_mut(&stack_top.0).unwrap();
+                let cc = cache.get_mut(&stack_top.1).unwrap();
+                cc.dependencies.push((q, input_hash));
+            }
+        };
+
         let old_version = {
             let caches = self.caches.read().unwrap();
             let cache = caches.get(&q);
@@ -177,19 +190,6 @@ impl Database {
             let cc = CachedComputation::new(old_version + 1);
             let cache = caches.entry(q).or_default();
             cache.insert(input_hash, cc);
-        };
-
-        {
-            let mut stack = self.stack.get_or_default().borrow_mut();
-            let stack_top = stack.iter().last().cloned();
-            stack.push((q, input_hash));
-
-            if let Some(stack_top) = stack_top {
-                let mut caches = self.caches.write().unwrap();
-                let cache = caches.get_mut(&stack_top.0).unwrap();
-                let cc = cache.get_mut(&stack_top.1).unwrap();
-                cc.dependencies.push((q, input_hash));
-            }
         };
 
         let out = Rc::new(f(self, i));
@@ -258,6 +258,7 @@ impl Database {
         let cache = caches.entry(q).or_default();
         let cc = cache.entry(input_hash).or_insert(default_cc);
         cc.value = output;
+        cc.version += 1;
     }
 }
 
